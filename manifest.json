@@ -1,8 +1,8 @@
 {
-  "display_name": "HTML Renderer",
+  "display_name": "酒馆渲染器",
   "author": "Hype3808",
-  "version": "1.0.0-beta.7",
-  "description": "Renders complete HTML documents in SillyTavern message code blocks inside auto-sizing iframes, with optional Tavern Helper and MVU support.",
+  "version": "1.0.1",
+  "description": "在可自动调整大小的 iframe 中渲染 SillyTavern 消息代码块里的完整 HTML 文档，并可选支持 Tavern Helper 和 MVU。",
   "js": "index.js",
   "css": "style.css",
   "loading_order": 100,

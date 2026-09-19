@@ -1,18 +1,18 @@
 # HTML Render Tavern
 
-A small SillyTavern extension that renders a complete HTML document found in a fenced message code block in an auto-sizing iframe. It is a focused implementation of the renderer behavior popularized by [JS-Slash-Runner / Tavern Helper](https://github.com/N0VI028/JS-Slash-Runner): the source remains a normal SillyTavern message, while its visual UI runs in an isolated iframe.
+这是一个小型 SillyTavern 扩展：它会将消息 fenced code block 中的完整 HTML 文档渲染到一个可自动调整大小的 iframe 中。它专注实现了 [JS-Slash-Runner / Tavern Helper](https://github.com/N0VI028/JS-Slash-Runner) 推广的渲染方式：源代码仍保留为普通的 SillyTavern 消息，而可视化界面则运行在隔离的 iframe 中。
 
-## Install
+## 安装
 
-Copy this folder to:
+将此文件夹复制到：
 
 `SillyTavern/public/scripts/extensions/third-party/html-render-tavern/`
 
-Then refresh SillyTavern and enable **HTML Render Tavern** in Extensions settings.
+然后刷新 SillyTavern，并在扩展设置中启用 **HTML Render Tavern**。
 
-## Message format
+## 消息格式
 
-Only a fenced code block that contains a closed `<body>` tag becomes a UI. The fence language is optional.
+只有包含闭合 `<body>` 标签的 fenced code block 才会变成界面。代码块语言标记是可选的。
 
 ````markdown
 ```
@@ -20,21 +20,21 @@ Only a fenced code block that contains a closed `<body>` tag becomes a UI. The f
 <html>
   <head><style>body { font-family: sans-serif; padding: 1rem }</style></head>
   <body>
-    <button onclick="this.textContent = 'Clicked!'">Click me</button>
+    <button onclick="this.textContent = '已点击！'">点击我</button>
   </body>
 </html>
 ```
 ````
 
-## Security
+## 安全性
 
-HTML messages can execute JavaScript. The **Tavern Helper / MVU bridge** is enabled by default for compatibility with cards made for JS-Slash-Runner. It deliberately grants the iframe access to the hosting SillyTavern page and exposes common APIs such as `getAllVariables`, `waitGlobalInitialized`, `eventOn`, `Mvu`, `$`, and `_`. Use it only for trusted cards. Turn the bridge off to use a sandboxed iframe instead.
+HTML 消息可以执行 JavaScript。为了兼容为 JS-Slash-Runner 制作的卡片，默认启用 **Tavern Helper / MVU 桥接**。它会特意授予 iframe 访问宿主 SillyTavern 页面的权限，并公开 `getAllVariables`、`waitGlobalInitialized`、`eventOn`、`Mvu`、`$` 和 `_` 等常用 API。请仅对受信任的卡片使用此功能。关闭桥接后即可改用沙箱 iframe。
 
-## Features
+## 功能
 
-- Detects complete HTML documents in message code blocks.
-- Renders with `srcdoc` (or optional Blob URLs) in a responsive iframe.
-- Automatically adjusts iframe height when content, images, or fonts change; document-level scrollbars are suppressed.
-- Works with dynamically added/re-rendered message nodes using a `MutationObserver`.
-- Lets users limit rendering to the newest N messages and optionally keep source visible.
-- Supports Tavern Helper's iframe-bound APIs, including MVU's `getAllVariables()` and variable-update events.
+- 检测消息代码块中的完整 HTML 文档。
+- 使用 `srcdoc`（或可选的 Blob URL）在响应式 iframe 中渲染。
+- 内容、图片或字体变化时自动调整 iframe 高度，并隐藏文档级滚动条。
+- 使用 `MutationObserver` 支持动态添加或重新渲染的消息节点。
+- 允许用户限制只渲染最新的 N 条消息，也可以选择保留源代码可见。
+- 支持 Tavern Helper 的 iframe 绑定 API，包括 MVU 的 `getAllVariables()` 和变量更新事件。

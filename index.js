@@ -1,8 +1,8 @@
 /*
  * HTML Render Tavern
- * A focused, dependency-free HTML renderer for SillyTavern message code blocks.
+ * 一个专注且无依赖的 SillyTavern 消息代码块 HTML 渲染器。
  *
- * Inspired by the iframe rendering approach in N0VI028/JS-Slash-Runner.
+ * 灵感来自 N0VI028/JS-Slash-Runner 的 iframe 渲染方案。
  */
 (() => {
     'use strict';
@@ -14,8 +14,8 @@
         renderDepth: 0,
         hideSource: true,
         useBlobUrls: false,
-        // JS-Slash-Runner-compatible cards use Tavern Helper / MVU globals.
-        // That requires a same-origin iframe, so it is a trusted-card mode.
+        // 兼容 JS-Slash-Runner 的卡片会使用 Tavern Helper / MVU 全局对象。
+        // 这需要同源 iframe，因此该模式只适用于受信任的卡片。
         parentBridge: true,
         sandbox: false,
     });
@@ -28,8 +28,8 @@
         window.extension_settings ??= {};
         const stored = window.extension_settings[SETTINGS_KEY] ?? {};
         settings = { ...DEFAULTS, ...stored };
-        // Version 1.0.0 saved `sandbox: true`; migrate it to the compatible
-        // default on upgrade. Users can switch back to isolation in settings.
+        // 1.0.0 版本保存过 `sandbox: true`；升级时将其迁移到兼容的默认值。
+        // 用户可以在设置中切换回隔离模式。
         if (stored.parentBridge === undefined) {
             settings.parentBridge = true;
             settings.sandbox = false;
@@ -56,8 +56,8 @@
     }
 
     function viewportScript() {
-        // This runs after the card markup, so its first measurement includes the
-        // card's own styles and layout instead of the browser's 150px iframe default.
+        // 此脚本在卡片标记之后运行，因此首次测量会包含卡片自身的样式和布局，
+        // 而不是使用浏览器默认的 150px iframe 高度。
         return `<script>
 (() => {
   const height = () => {
@@ -65,9 +65,8 @@
     const html = document.documentElement;
     if (!body || !html) return 1;
 
-    // scrollHeight can remain equal to the old iframe viewport after a card
-    // switches from a long tab to a short tab. Measure the visible content's
-    // bottom edge instead, which can shrink as well as grow.
+    // 卡片从长标签页切换到短标签页后，scrollHeight 可能仍等于旧的 iframe 视口高度。
+    // 因此改为测量可见内容的底部边缘，这样高度既能增加，也能缩小。
     const bodyTop = body.getBoundingClientRect().top;
     let contentBottom = 0;
     for (const child of body.children) {
@@ -93,9 +92,8 @@
     }
 
     function parentBridgeScript() {
-        // The card runs in its own document, but older Tavern Helper cards expect
-        // its convenience globals. Keep DOM queries local while forwarding only
-        // the explicit Tavern Helper / MVU functions and values from the parent.
+        // 卡片运行在自己的文档中，但较旧的 Tavern Helper 卡片需要其便捷的全局对象。
+        // DOM 查询保持在本地，同时只从父页面转发明确的 Tavern Helper / MVU 函数和值。
         return `<script>
 (() => {
   try {
@@ -110,9 +108,9 @@
       window.$ = window.jQuery = localJQuery;
     }
     if (host._) window._ = host._;
-    // Tavern Helper puts iframe-aware functions in its _bind map. Binding those to this
-    // iframe window is essential: getAllVariables() can then resolve the message
-    // that owns this card instead of reading the newest chat message.
+    // Tavern Helper 会把支持 iframe 的函数放在 _bind 映射中。将这些函数绑定到此 iframe
+    // 的 window 至关重要：这样 getAllVariables() 才能解析拥有此卡片的消息，
+    // 而不是读取最新的聊天消息。
     for (const [name, value] of Object.entries(api._bind || {})) {
       if (typeof value === 'function') window[name.replace(/^_/, '')] = value.bind(window);
     }
@@ -123,7 +121,7 @@
     }
     Object.defineProperty(window, 'Mvu', { configurable: true, get: () => host.Mvu || api.Mvu });
   } catch (error) {
-    console.warn('[HTML Render Tavern] Parent API bridge is unavailable.', error);
+    console.warn('[HTML Render Tavern] 父页面 API 桥接不可用。', error);
   }
 })();
 </script>`;
@@ -132,9 +130,8 @@
     function createDocument(source, inheritedStyle, useParentBridge) {
         const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${useParentBridge ? parentBridgeScript() : ''}`;
         const script = viewportScript();
-        // The closing-body injection intentionally comes after card CSS, including
-        // CSS with !important. It removes only document-level scrolling; a card's
-        // own scrollable panels remain functional.
+        // closing-body 注入会特意放在卡片 CSS（包括带有 !important 的 CSS）之后。
+        // 它只移除文档级滚动，卡片自身可滚动的面板仍然正常工作。
         const finalStyle = `<style id="hrt-document-style">
 html{color:${inheritedStyle.color};font-family:${inheritedStyle.fontFamily};font-size:${inheritedStyle.fontSize};line-height:${inheritedStyle.lineHeight};}
 html,body{margin:0!important;padding:0!important;max-width:100%!important;overflow:hidden!important;}
@@ -190,8 +187,8 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         const source = code.textContent ?? '';
         if (!isHtmlDocument(source)) return;
 
-        // SillyTavern may recreate the same message node during chat hydration.
-        // Reuse the existing iframe instead of rendering a second copy.
+        // SillyTavern 可能会在聊天水合期间重新创建相同的消息节点。
+        // 复用现有 iframe，而不是再次渲染一份副本。
         const key = renderKey(pre);
         const existing = key
             ? [...document.querySelectorAll('.hrt-frame[data-hrt-key]')].find(frame => frame.dataset.hrtKey === key)
@@ -204,14 +201,14 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
 
         const frame = document.createElement('iframe');
         frame.className = 'hrt-frame';
-        frame.title = 'Rendered HTML message';
+        frame.title = '已渲染的 HTML 消息';
         frame.loading = 'lazy';
         frame.setAttribute('frameborder', '0');
         const message = pre.closest('.mes');
         const messageId = message?.getAttribute('mesid');
         if (messageId !== null && messageId !== undefined) {
-            // Tavern Helper identifies a rendered-card's owning message from this
-            // stable iframe name/id. Its required format is
+            // Tavern Helper 通过稳定的 iframe name/id 识别渲染卡片所属的消息。
+            // 所需格式为：
             // TH-message--<message-id>--<code-block-index>.
             const blockIndex = [...message.querySelectorAll('pre')].indexOf(pre);
             frame.id = `TH-message--${messageId}--${Math.max(0, blockIndex)}`;
@@ -219,15 +216,14 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         }
         if (key) frame.dataset.hrtKey = key;
         if (!settings.parentBridge) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
-        // An iframe does not inherit SillyTavern's typography or text colour.
-        // Seed its defaults from the enclosing message without overriding a card's
-        // explicit CSS, so unstyled text remains readable in the active theme.
+        // iframe 不会继承 SillyTavern 的字体或文字颜色。
+        // 从外层消息设置默认值，但不覆盖卡片明确指定的 CSS，
+        // 这样未设置样式的文字在当前主题中仍然清晰可读。
         const messageText = pre.closest('.mes_text') ?? document.body;
         const inheritedStyle = getComputedStyle(messageText);
         const themeStyle = getComputedStyle(document.documentElement);
-        // `mes_text` can intentionally be dimmed by a card/theme. Transparent
-        // iframe documents should instead start with the app's normal foreground
-        // colour, as if their text were written directly into the chat surface.
+        // 卡片或主题可能会有意调暗 `mes_text`。透明的 iframe 文档应改用应用的正常前景色，
+        // 就像文字直接写在聊天区域上一样。
         const themeForeground = themeStyle.getPropertyValue('--SmartThemeBodyColor').trim();
         const defaultColor = themeForeground && CSS.supports('color', themeForeground)
             ? themeForeground
@@ -281,14 +277,14 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         section.id = 'hrt-settings';
         section.className = 'inline-drawer';
         section.innerHTML = `
-<div class="inline-drawer-toggle inline-drawer-header"><b>HTML Render Tavern</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
+<div class="inline-drawer-toggle inline-drawer-header"><b>酒馆渲染器</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>
 <div class="inline-drawer-content">
-  <label class="checkbox_label"><input data-setting="enabled" type="checkbox"> Enable HTML message rendering</label>
-  <label class="checkbox_label"><input data-setting="hideSource" type="checkbox"> Hide rendered source blocks</label>
-  <label class="checkbox_label"><input data-setting="useBlobUrls" type="checkbox"> Use Blob URLs (debug friendly)</label>
-  <label class="checkbox_label"><input data-setting="parentBridge" type="checkbox"> Enable Tavern Helper / MVU bridge <small>(trusted cards only)</small></label>
-  <label>Render newest <input data-setting="renderDepth" type="number" min="0" step="1" class="text_pole"> messages <small>(0 = all)</small></label>
-  <p class="hrt-note">Only fenced code blocks containing a complete <code>&lt;body&gt;…&lt;/body&gt;</code> document are rendered. The MVU bridge intentionally allows trusted cards to access SillyTavern page APIs. Turn it off for untrusted HTML.</p>
+    <label class="checkbox_label"><input data-setting="enabled" type="checkbox"> 启用 HTML 消息渲染</label>
+    <label class="checkbox_label"><input data-setting="hideSource" type="checkbox"> 隐藏已渲染的源代码块</label>
+    <label class="checkbox_label"><input data-setting="useBlobUrls" type="checkbox"> 使用 Blob URL（便于调试）</label>
+    <label class="checkbox_label"><input data-setting="parentBridge" type="checkbox"> 启用 Tavern Helper / MVU 桥接 <small>（仅限受信任的卡片）</small></label>
+    <label>渲染最新的 <input data-setting="renderDepth" type="number" min="0" step="1" class="text_pole"> 条消息 <small>（0 = 全部）</small></label>
+    <p class="hrt-note">只有包含完整 <code>&lt;body&gt;…&lt;/body&gt;</code> 文档的 fenced code block 才会被渲染。MVU 桥接会特意允许受信任的卡片访问 SillyTavern 页面 API。对于不受信任的 HTML，请将其关闭。</p>
 </div>`;
         host.append(section);
         section.querySelectorAll('[data-setting]').forEach(input => {

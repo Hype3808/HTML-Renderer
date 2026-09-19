@@ -14,7 +14,10 @@
         renderDepth: 0,
         hideSource: true,
         useBlobUrls: false,
-        sandbox: true,
+        // JS-Slash-Runner-compatible cards use Tavern Helper / MVU globals.
+        // That requires a same-origin iframe, so it is a trusted-card mode.
+        parentBridge: true,
+        sandbox: false,
     });
     const rendered = new WeakMap();
     let settings;
@@ -25,6 +28,12 @@
         window.extension_settings ??= {};
         const stored = window.extension_settings[SETTINGS_KEY] ?? {};
         settings = { ...DEFAULTS, ...stored };
+        // Version 1.0.0 saved `sandbox: true`; migrate it to the compatible
+        // default on upgrade. Users can switch back to isolation in settings.
+        if (stored.parentBridge === undefined) {
+            settings.parentBridge = true;
+            settings.sandbox = false;
+        }
         window.extension_settings[SETTINGS_KEY] = settings;
         return settings;
     }
@@ -70,8 +79,45 @@
 </script>`;
     }
 
-    function createDocument(source, inheritedStyle) {
-        const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`;
+    function parentBridgeScript() {
+        // The card runs in its own document, but older Tavern Helper cards expect
+        // its convenience globals. Keep DOM queries local while forwarding only
+        // the explicit Tavern Helper / MVU functions and values from the parent.
+        return `<script>
+(() => {
+  try {
+    const host = window.parent;
+    const api = host.TavernHelper || host;
+    const hostJQuery = host.jQuery || host.$;
+    if (hostJQuery) {
+      const localJQuery = (selector, context) => typeof selector === 'function'
+        ? hostJQuery(selector)
+        : hostJQuery(selector, context || document);
+      localJQuery.fn = hostJQuery.fn;
+      window.$ = window.jQuery = localJQuery;
+    }
+    if (host._) window._ = host._;
+    // Tavern Helper puts iframe-aware functions in its _bind map. Binding those to this
+    // iframe window is essential: getAllVariables() can then resolve the message
+    // that owns this card instead of reading the newest chat message.
+    for (const [name, value] of Object.entries(api._bind || {})) {
+      if (typeof value === 'function') window[name.replace(/^_/, '')] = value.bind(window);
+    }
+    for (const name of ['getAllVariables', 'waitGlobalInitialized', 'eventOn', 'errorCatched']) {
+      if (typeof window[name] !== 'function' && typeof api[name] === 'function') {
+        window[name] = api[name].bind(api);
+      }
+    }
+    Object.defineProperty(window, 'Mvu', { configurable: true, get: () => host.Mvu || api.Mvu });
+  } catch (error) {
+    console.warn('[HTML Render Tavern] Parent API bridge is unavailable.', error);
+  }
+})();
+</script>`;
+    }
+
+    function createDocument(source, inheritedStyle, useParentBridge) {
+        const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${useParentBridge ? parentBridgeScript() : ''}`;
         const script = viewportScript();
         // The closing-body injection intentionally comes after card CSS, including
         // CSS with !important. It removes only document-level scrolling; a card's
@@ -112,18 +158,33 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         frame.title = 'Rendered HTML message';
         frame.loading = 'lazy';
         frame.setAttribute('frameborder', '0');
-        if (settings.sandbox) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
+        const messageId = pre.closest('.mes')?.getAttribute('mesid');
+        if (messageId !== null && messageId !== undefined) {
+            // Tavern Helper identifies a rendered-card's owning message from this
+            // stable iframe name/id. The bridge's bound helpers rely on it.
+            frame.id = `TH-message--${messageId}`;
+            frame.name = frame.id;
+        }
+        if (!settings.parentBridge) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
         // An iframe does not inherit SillyTavern's typography or text colour.
         // Seed its defaults from the enclosing message without overriding a card's
         // explicit CSS, so unstyled text remains readable in the active theme.
         const messageText = pre.closest('.mes_text') ?? document.body;
         const inheritedStyle = getComputedStyle(messageText);
+        const themeStyle = getComputedStyle(document.documentElement);
+        // `mes_text` can intentionally be dimmed by a card/theme. Transparent
+        // iframe documents should instead start with the app's normal foreground
+        // colour, as if their text were written directly into the chat surface.
+        const themeForeground = themeStyle.getPropertyValue('--SmartThemeBodyColor').trim();
+        const defaultColor = themeForeground && CSS.supports('color', themeForeground)
+            ? themeForeground
+            : inheritedStyle.color;
         const documentSource = createDocument(source, {
-            color: inheritedStyle.color,
+            color: defaultColor,
             fontFamily: inheritedStyle.fontFamily,
             fontSize: inheritedStyle.fontSize,
             lineHeight: inheritedStyle.lineHeight,
-        });
+        }, settings.parentBridge);
         let url;
         if (settings.useBlobUrls) {
             url = URL.createObjectURL(new Blob([documentSource], { type: 'text/html' }));
@@ -171,9 +232,9 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
   <label class="checkbox_label"><input data-setting="enabled" type="checkbox"> Enable HTML message rendering</label>
   <label class="checkbox_label"><input data-setting="hideSource" type="checkbox"> Hide rendered source blocks</label>
   <label class="checkbox_label"><input data-setting="useBlobUrls" type="checkbox"> Use Blob URLs (debug friendly)</label>
-  <label class="checkbox_label"><input data-setting="sandbox" type="checkbox"> Sandbox rendered HTML (recommended)</label>
+  <label class="checkbox_label"><input data-setting="parentBridge" type="checkbox"> Enable Tavern Helper / MVU bridge <small>(trusted cards only)</small></label>
   <label>Render newest <input data-setting="renderDepth" type="number" min="0" step="1" class="text_pole"> messages <small>(0 = all)</small></label>
-  <p class="hrt-note">Only fenced code blocks containing a complete <code>&lt;body&gt;…&lt;/body&gt;</code> document are rendered. HTML and scripts from a message are untrusted code.</p>
+  <p class="hrt-note">Only fenced code blocks containing a complete <code>&lt;body&gt;…&lt;/body&gt;</code> document are rendered. The MVU bridge intentionally allows trusted cards to access SillyTavern page APIs. Turn it off for untrusted HTML.</p>
 </div>`;
         host.append(section);
         section.querySelectorAll('[data-setting]').forEach(input => {
@@ -182,6 +243,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
             if (input.type === 'number') input.value = settings[key];
             input.addEventListener('change', () => {
                 settings[key] = input.type === 'checkbox' ? input.checked : Math.max(0, Number(input.value) || 0);
+                if (key === 'parentBridge') settings.sandbox = !settings.parentBridge;
                 saveSettings();
                 redraw();
             });

@@ -28,7 +28,7 @@ Only a fenced code block that contains a closed `<body>` tag becomes a UI. The f
 
 ## Security
 
-HTML messages can execute JavaScript. Sandboxing is enabled by default and deliberately does **not** grant same-origin access. Leave it enabled unless you trust the card/message and specifically need its scripts to access its original origin.
+HTML messages can execute JavaScript. The **Tavern Helper / MVU bridge** is enabled by default for compatibility with cards made for JS-Slash-Runner. It deliberately grants the iframe access to the hosting SillyTavern page and exposes common APIs such as `getAllVariables`, `waitGlobalInitialized`, `eventOn`, `Mvu`, `$`, and `_`. Use it only for trusted cards. Turn the bridge off to use a sandboxed iframe instead.
 
 ## Features
 
@@ -37,3 +37,4 @@ HTML messages can execute JavaScript. Sandboxing is enabled by default and delib
 - Automatically adjusts iframe height when content, images, or fonts change; document-level scrollbars are suppressed.
 - Works with dynamically added/re-rendered message nodes using a `MutationObserver`.
 - Lets users limit rendering to the newest N messages and optionally keep source visible.
+- Supports Tavern Helper's iframe-bound APIs, including MVU's `getAllVariables()` and variable-update events.

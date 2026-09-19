@@ -24,22 +24,43 @@
     let observer;
     let queued = false;
 
+    function getLocalSettings() {
+        try {
+            const stored = localStorage.getItem(`${SETTINGS_KEY}:backup`);
+            return stored ? JSON.parse(stored) : {};
+        } catch {
+            return {};
+        }
+    }
+
+    function saveLocalSettings() {
+        try {
+            localStorage.setItem(`${SETTINGS_KEY}:backup`, JSON.stringify(settings));
+        } catch {
+            // localStorage can be unavailable in privacy-restricted contexts.
+        }
+    }
+
     function getSettings() {
         window.extension_settings ??= {};
         const stored = window.extension_settings[SETTINGS_KEY] ?? {};
-        settings = { ...DEFAULTS, ...stored };
+        const localStored = getLocalSettings();
+        const persisted = stored && Object.keys(stored).length > 0 ? stored : localStored;
+        settings = { ...DEFAULTS, ...persisted };
         // 1.0.0 版本保存过 `sandbox: true`；升级时将其迁移到兼容的默认值。
         // 用户可以在设置中切换回隔离模式。
-        if (stored.parentBridge === undefined) {
+        if (persisted.parentBridge === undefined) {
             settings.parentBridge = true;
             settings.sandbox = false;
         }
         window.extension_settings[SETTINGS_KEY] = settings;
+        saveLocalSettings();
         return settings;
     }
 
     function saveSettings() {
         window.extension_settings[SETTINGS_KEY] = settings;
+        saveLocalSettings();
         window.saveSettingsDebounced?.();
     }
 

@@ -7,6 +7,11 @@
 (() => {
     'use strict';
 
+    // SillyTavern can reload an extension script without a full page reload.
+    // Tear down the previous instance before installing a new one.
+    window.__HTML_RENDER_TAVERN__?.destroy?.();
+    let startupCancelled = false;
+
     const EXTENSION_ID = 'html-render-tavern';
     const SETTINGS_KEY = 'htmlRenderTavern';
     const DEFAULTS = Object.freeze({
@@ -98,15 +103,33 @@
     return Math.max(1, body.scrollHeight);
   };
   const report = () => parent.postMessage({ type: 'html-render-tavern:height', height: height() }, '*');
+  const resizeObservers = [];
+  const mutationObservers = [];
   const observe = () => {
-    new ResizeObserver(report).observe(document.documentElement);
-    if (document.body) new ResizeObserver(report).observe(document.body);
-    new MutationObserver(report).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    const documentObserver = new ResizeObserver(report);
+    documentObserver.observe(document.documentElement);
+    resizeObservers.push(documentObserver);
+    if (document.body) {
+      const bodyObserver = new ResizeObserver(report);
+      bodyObserver.observe(document.body);
+      resizeObservers.push(bodyObserver);
+    }
+    const mutationObserver = new MutationObserver(report);
+    mutationObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+    mutationObservers.push(mutationObserver);
+  };
+  const stop = () => {
+    resizeObservers.forEach(observer => observer.disconnect());
+    mutationObservers.forEach(observer => observer.disconnect());
   };
   observe();
+  addEventListener('pagehide', stop, { once: true });
   addEventListener('load', () => { report(); requestAnimationFrame(report); setTimeout(report, 100); });
   document.fonts?.ready?.then(report);
   addEventListener('message', event => { if (event.data?.type === 'html-render-tavern:measure') report(); });
+  addEventListener('message', event => {
+    if (event.data?.type === 'html-render-tavern:dispose') stop();
+  });
   requestAnimationFrame(report);
 })();
 </script>`;
@@ -135,12 +158,16 @@
     for (const [name, value] of Object.entries(api._bind || {})) {
       if (typeof value === 'function') window[name.replace(/^_/, '')] = value.bind(window);
     }
-    for (const name of ['getAllVariables', 'waitGlobalInitialized', 'eventOn', 'errorCatched']) {
+    for (const name of ['getAllVariables', 'waitGlobalInitialized', 'eventOn', 'eventClearAll', 'errorCatched']) {
       if (typeof window[name] !== 'function' && typeof api[name] === 'function') {
         window[name] = api[name].bind(api);
       }
     }
     Object.defineProperty(window, 'Mvu', { configurable: true, get: () => host.Mvu || api.Mvu });
+    addEventListener('pagehide', () => window.eventClearAll?.(), { once: true });
+    addEventListener('message', event => {
+      if (event.data?.type === 'html-render-tavern:dispose') window.eventClearAll?.();
+    });
   } catch (error) {
     console.warn('[HTML Render Tavern] 父页面 API 桥接不可用。', error);
   }
@@ -173,7 +200,8 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         const entry = rendered.get(pre);
         if (!entry) return;
         entry.frame.remove();
-        if (entry.url) URL.revokeObjectURL(entry.url);
+        const blobUrl = entry.url || entry.frame.dataset.hrtBlobUrl;
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
         pre.classList.remove('hrt-source-hidden');
         rendered.delete(pre);
     }
@@ -192,11 +220,24 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
             const key = frame.dataset.hrtKey;
             if (!key) return;
             if (seen.has(key)) {
-                frame.remove();
+                disposeFrame(frame);
             } else {
                 seen.add(key);
             }
         });
+    }
+
+    function disposeFrame(frame) {
+        try {
+            frame.contentWindow?.postMessage({ type: 'html-render-tavern:dispose' }, '*');
+            frame.contentWindow?.eventClearAll?.();
+        } catch {
+            // The iframe may already be detached or navigating.
+        }
+        const blobUrl = frame.dataset.hrtBlobUrl;
+        if (blobUrl) URL.revokeObjectURL(blobUrl);
+        frame.src = 'about:blank';
+        frame.remove();
     }
 
     function renderPre(pre) {
@@ -204,7 +245,10 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         if (!code || !settings.enabled || !messageIsInDepth(pre)) return;
         const currentEntry = rendered.get(pre);
         if (currentEntry?.frame.isConnected) return;
-        if (currentEntry) rendered.delete(pre);
+        if (currentEntry) {
+            if (currentEntry.frame.dataset.hrtBlobUrl) URL.revokeObjectURL(currentEntry.frame.dataset.hrtBlobUrl);
+            rendered.delete(pre);
+        }
         const source = code.textContent ?? '';
         if (!isHtmlDocument(source)) return;
 
@@ -258,6 +302,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         let url;
         if (settings.useBlobUrls) {
             url = URL.createObjectURL(new Blob([documentSource], { type: 'text/html' }));
+            frame.dataset.hrtBlobUrl = url;
             frame.src = url;
         } else {
             frame.srcdoc = documentSource;
@@ -324,16 +369,37 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
     function start() {
         getSettings();
         addSettingsUi();
-        window.addEventListener('message', event => {
+        const onMessage = event => {
             if (event.data?.type !== 'html-render-tavern:height') return;
             const frame = [...document.querySelectorAll('.hrt-frame')].find(item => item.contentWindow === event.source);
             if (frame && Number.isFinite(event.data.height)) frame.style.height = `${Math.max(1, Math.ceil(event.data.height))}px`;
-        });
+        };
+        window.addEventListener('message', onMessage);
         observer = new MutationObserver(scheduleRefresh);
         observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+        window.__HTML_RENDER_TAVERN__ = {
+            destroy() {
+                observer?.disconnect();
+                window.removeEventListener('message', onMessage);
+                document.querySelectorAll('.hrt-frame').forEach(disposeFrame);
+                document.querySelectorAll('pre.hrt-source-hidden').forEach(pre => pre.classList.remove('hrt-source-hidden'));
+            },
+        };
         scheduleRefresh();
     }
 
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-    else start();
+    if (document.readyState === 'loading') {
+        const onReady = () => {
+            if (!startupCancelled) start();
+        };
+        window.__HTML_RENDER_TAVERN__ = {
+            destroy() {
+                startupCancelled = true;
+                document.removeEventListener('DOMContentLoaded', onReady);
+            },
+        };
+        document.addEventListener('DOMContentLoaded', onReady, { once: true });
+    } else {
+        start();
+    }
 })();

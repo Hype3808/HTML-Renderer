@@ -1,7 +1,7 @@
 {
   "display_name": "酒馆渲染器",
   "author": "Hype3808",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "在可自动调整大小的 iframe 中渲染 SillyTavern 消息代码块里的完整 HTML 文档，并可选支持 Tavern Helper 和 MVU。",
   "js": "index.js",
   "css": "style.css",

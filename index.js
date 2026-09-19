@@ -60,10 +60,23 @@
         // card's own styles and layout instead of the browser's 150px iframe default.
         return `<script>
 (() => {
-  const height = () => Math.max(
-    document.documentElement.scrollHeight, document.documentElement.offsetHeight,
-    document.body ? document.body.scrollHeight : 0, document.body ? document.body.offsetHeight : 0
-  );
+  const height = () => {
+    const body = document.body;
+    const html = document.documentElement;
+    if (!body || !html) return 1;
+
+    // scrollHeight can remain equal to the old iframe viewport after a card
+    // switches from a long tab to a short tab. Measure the visible content's
+    // bottom edge instead, which can shrink as well as grow.
+    const bodyTop = body.getBoundingClientRect().top;
+    let contentBottom = 0;
+    for (const child of body.children) {
+      const rect = child.getBoundingClientRect();
+      if (rect.width || rect.height) contentBottom = Math.max(contentBottom, rect.bottom - bodyTop);
+    }
+    if (contentBottom > 0) return Math.ceil(contentBottom + 1);
+    return Math.max(1, body.scrollHeight);
+  };
   const report = () => parent.postMessage({ type: 'html-render-tavern:height', height: height() }, '*');
   const observe = () => {
     new ResizeObserver(report).observe(document.documentElement);
@@ -147,11 +160,47 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         rendered.delete(pre);
     }
 
+    function renderKey(pre) {
+        const message = pre.closest('.mes');
+        const messageId = message?.getAttribute('mesid');
+        if (messageId === null || messageId === undefined) return null;
+        const blockIndex = [...message.querySelectorAll('pre')].indexOf(pre);
+        return `${messageId}:${Math.max(0, blockIndex)}`;
+    }
+
+    function removeDuplicateFrames() {
+        const seen = new Set();
+        document.querySelectorAll('.hrt-frame[data-hrt-key]').forEach(frame => {
+            const key = frame.dataset.hrtKey;
+            if (!key) return;
+            if (seen.has(key)) {
+                frame.remove();
+            } else {
+                seen.add(key);
+            }
+        });
+    }
+
     function renderPre(pre) {
         const code = pre.querySelector(':scope > code');
-        if (!code || rendered.has(pre) || !settings.enabled || !messageIsInDepth(pre)) return;
+        if (!code || !settings.enabled || !messageIsInDepth(pre)) return;
+        const currentEntry = rendered.get(pre);
+        if (currentEntry?.frame.isConnected) return;
+        if (currentEntry) rendered.delete(pre);
         const source = code.textContent ?? '';
         if (!isHtmlDocument(source)) return;
+
+        // SillyTavern may recreate the same message node during chat hydration.
+        // Reuse the existing iframe instead of rendering a second copy.
+        const key = renderKey(pre);
+        const existing = key
+            ? [...document.querySelectorAll('.hrt-frame[data-hrt-key]')].find(frame => frame.dataset.hrtKey === key)
+            : null;
+        if (existing) {
+            if (settings.hideSource) pre.classList.add('hrt-source-hidden');
+            rendered.set(pre, { frame: existing, url: null });
+            return;
+        }
 
         const frame = document.createElement('iframe');
         frame.className = 'hrt-frame';
@@ -168,6 +217,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
             frame.id = `TH-message--${messageId}--${Math.max(0, blockIndex)}`;
             frame.name = frame.id;
         }
+        if (key) frame.dataset.hrtKey = key;
         if (!settings.parentBridge) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
         // An iframe does not inherit SillyTavern's typography or text colour.
         // Seed its defaults from the enclosing message without overriding a card's
@@ -203,6 +253,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
     }
 
     function refresh() {
+        removeDuplicateFrames();
         document.querySelectorAll('pre').forEach(pre => {
             if (!settings.enabled || !messageIsInDepth(pre)) clearRendered(pre);
             else renderPre(pre);

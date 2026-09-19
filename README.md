@@ -34,6 +34,6 @@ HTML messages can execute JavaScript. Sandboxing is enabled by default and delib
 
 - Detects complete HTML documents in message code blocks.
 - Renders with `srcdoc` (or optional Blob URLs) in a responsive iframe.
-- Automatically adjusts iframe height when content changes.
+- Automatically adjusts iframe height when content, images, or fonts change; document-level scrollbars are suppressed.
 - Works with dynamically added/re-rendered message nodes using a `MutationObserver`.
 - Lets users limit rendering to the newest N messages and optionally keep source visible.

@@ -47,25 +47,49 @@
     }
 
     function viewportScript() {
-        // This runs inside the iframe only. It reports document height to its host.
+        // This runs after the card markup, so its first measurement includes the
+        // card's own styles and layout instead of the browser's 150px iframe default.
         return `<script>
 (() => {
-  const report = () => parent.postMessage({ type: 'html-render-tavern:height', height: Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0) }, '*');
-  new ResizeObserver(report).observe(document.documentElement);
-  addEventListener('load', report);
-  setTimeout(report, 0);
+  const height = () => Math.max(
+    document.documentElement.scrollHeight, document.documentElement.offsetHeight,
+    document.body ? document.body.scrollHeight : 0, document.body ? document.body.offsetHeight : 0
+  );
+  const report = () => parent.postMessage({ type: 'html-render-tavern:height', height: height() }, '*');
+  const observe = () => {
+    new ResizeObserver(report).observe(document.documentElement);
+    if (document.body) new ResizeObserver(report).observe(document.body);
+    new MutationObserver(report).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
+  };
+  observe();
+  addEventListener('load', () => { report(); requestAnimationFrame(report); setTimeout(report, 100); });
+  document.fonts?.ready?.then(report);
+  addEventListener('message', event => { if (event.data?.type === 'html-render-tavern:measure') report(); });
+  requestAnimationFrame(report);
 })();
 </script>`;
     }
 
-    function createDocument(source) {
-        const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<style>html,body{margin:0;padding:0;max-width:100%;overflow-x:hidden}*,*::before,*::after{box-sizing:border-box}</style>`;
+    function createDocument(source, inheritedStyle) {
+        const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`;
         const script = viewportScript();
+        // The closing-body injection intentionally comes after card CSS, including
+        // CSS with !important. It removes only document-level scrolling; a card's
+        // own scrollable panels remain functional.
+        const finalStyle = `<style id="hrt-document-style">
+html{color:${inheritedStyle.color};font-family:${inheritedStyle.fontFamily};font-size:${inheritedStyle.fontSize};line-height:${inheritedStyle.lineHeight};}
+html,body{margin:0!important;padding:0!important;max-width:100%!important;overflow:hidden!important;}
+*,*::before,*::after{box-sizing:border-box;}
+html{scrollbar-width:none;-ms-overflow-style:none;}
+html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}
+</style>`;
+        let documentSource = source;
         if (/<head(?:\s[^>]*)?>/i.test(source)) {
-            return source.replace(/<head(\s[^>]*)?>/i, match => `${match}${head}${script}`);
+            documentSource = source.replace(/<head(\s[^>]*)?>/i, match => `${match}${head}`);
+        } else {
+            documentSource = source.replace(/<body(\s[^>]*)?>/i, match => `<!doctype html><html><head>${head}</head>${match}`);
         }
-        return source.replace(/<body(\s[^>]*)?>/i, match => `<!doctype html><html><head>${head}${script}</head>${match}`);
+        return documentSource.replace(/<\/body\s*>/i, `${finalStyle}${script}</body>`);
     }
 
     function clearRendered(pre) {
@@ -89,7 +113,17 @@
         frame.loading = 'lazy';
         frame.setAttribute('frameborder', '0');
         if (settings.sandbox) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
-        const documentSource = createDocument(source);
+        // An iframe does not inherit SillyTavern's typography or text colour.
+        // Seed its defaults from the enclosing message without overriding a card's
+        // explicit CSS, so unstyled text remains readable in the active theme.
+        const messageText = pre.closest('.mes_text') ?? document.body;
+        const inheritedStyle = getComputedStyle(messageText);
+        const documentSource = createDocument(source, {
+            color: inheritedStyle.color,
+            fontFamily: inheritedStyle.fontFamily,
+            fontSize: inheritedStyle.fontSize,
+            lineHeight: inheritedStyle.lineHeight,
+        });
         let url;
         if (settings.useBlobUrls) {
             url = URL.createObjectURL(new Blob([documentSource], { type: 'text/html' }));
@@ -99,6 +133,7 @@
         }
 
         pre.insertAdjacentElement('afterend', frame);
+        frame.addEventListener('load', () => frame.contentWindow?.postMessage({ type: 'html-render-tavern:measure' }, '*'));
         if (settings.hideSource) pre.classList.add('hrt-source-hidden');
         rendered.set(pre, { frame, url });
     }

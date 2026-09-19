@@ -158,11 +158,14 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         frame.title = 'Rendered HTML message';
         frame.loading = 'lazy';
         frame.setAttribute('frameborder', '0');
-        const messageId = pre.closest('.mes')?.getAttribute('mesid');
+        const message = pre.closest('.mes');
+        const messageId = message?.getAttribute('mesid');
         if (messageId !== null && messageId !== undefined) {
             // Tavern Helper identifies a rendered-card's owning message from this
-            // stable iframe name/id. The bridge's bound helpers rely on it.
-            frame.id = `TH-message--${messageId}`;
+            // stable iframe name/id. Its required format is
+            // TH-message--<message-id>--<code-block-index>.
+            const blockIndex = [...message.querySelectorAll('pre')].indexOf(pre);
+            frame.id = `TH-message--${messageId}--${Math.max(0, blockIndex)}`;
             frame.name = frame.id;
         }
         if (!settings.parentBridge) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');

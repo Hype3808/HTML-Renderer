@@ -1,7 +1,7 @@
 {
   "display_name": "HTML Renderer",
   "author": "Hype3808",
-  "version": "1.0.0-beta.4",
+  "version": "1.0.0-beta.5",
   "description": "Renders complete HTML documents in SillyTavern message code blocks inside auto-sizing iframes, with optional Tavern Helper and MVU support.",
   "js": "index.js",
   "css": "style.css",

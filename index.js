@@ -11,6 +11,8 @@
     // Tear down the previous instance before installing a new one.
     window.__HTML_RENDER_TAVERN__?.destroy?.();
     let startupCancelled = false;
+    let isDestroyed = false;
+    let refreshRafId = null;
 
     const EXTENSION_ID = 'html-render-tavern';
     const SETTINGS_KEY = 'htmlRenderTavern';
@@ -127,7 +129,9 @@
       const h = height();
       if (Math.abs(h - lastReportedHeight) >= 1) {
         lastReportedHeight = h;
-        parent.postMessage({ type: 'html-render-tavern:height', height: h }, '*');
+        try {
+          parent.postMessage({ type: 'html-render-tavern:height', height: h }, '*');
+        } catch {}
       }
     });
   };
@@ -210,7 +214,7 @@
     if (host.toastr) window.toastr = host.toastr;
     if (host.TavernHelper || api) window.TavernHelper = host.TavernHelper || api;
 
-    // 绑定 Tavern Helper 的 _bind 函数
+    // 绑定 Tavern Helper 的 _bind 函数（以 iframe window 作为调用上下文）
     for (const [name, value] of Object.entries(api._bind || {})) {
       if (typeof value === 'function') window[name.replace(/^_/, '')] = value.bind(window);
     }
@@ -225,10 +229,16 @@
       if (typeof window[name] !== 'function' && typeof api[name] === 'function') {
         window[name] = typeof api._bind?.[name] === 'function'
           ? api._bind[name].bind(window)
-          : api[name].bind(api);
+          : api[name].bind(window);
       }
     }
-    const getMvu = () => host.Mvu || api.Mvu || host.mvu || api.mvu;
+    const getMvu = () => {
+      try {
+        return host.Mvu || api.Mvu || host.mvu || api.mvu;
+      } catch {
+        return undefined;
+      }
+    };
     Object.defineProperty(window, 'Mvu', { configurable: true, get: getMvu });
     Object.defineProperty(window, 'mvu', { configurable: true, get: getMvu });
 
@@ -291,12 +301,13 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
     }
 
     function disposeFrame(frame) {
-        if (!frame) return;
+        if (!frame || frame.__hrt_disposed) return;
+        frame.__hrt_disposed = true;
         try {
             frame.contentWindow?.postMessage({ type: 'html-render-tavern:dispose' }, '*');
             frame.contentWindow?.eventClearAll?.();
         } catch {
-            // The iframe may already be detached or navigating.
+            // The iframe may already be detached or cross-origin.
         }
         const blobUrl = frame.dataset.hrtBlobUrl;
         if (blobUrl) URL.revokeObjectURL(blobUrl);
@@ -414,12 +425,13 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         }
 
         pre.insertAdjacentElement('afterend', frame);
-        frame.addEventListener('load', () => frame.contentWindow?.postMessage({ type: 'html-render-tavern:measure' }, '*'));
+        frame.addEventListener('load', () => frame.contentWindow?.postMessage({ type: 'html-render-tavern:measure' }, '*'), { once: true });
         if (settings.hideSource) pre.classList.add('hrt-source-hidden');
         rendered.set(pre, { frame, url, source });
     }
 
     function refresh() {
+        if (isDestroyed) return;
         cleanOrphanAndDuplicateFrames();
         if (!document.getElementById('hrt-settings')) addSettingsUi();
 
@@ -440,15 +452,17 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
     }
 
     function scheduleRefresh() {
-        if (queued) return;
+        if (isDestroyed || queued) return;
         queued = true;
-        requestAnimationFrame(() => {
+        refreshRafId = requestAnimationFrame(() => {
             queued = false;
-            refresh();
+            refreshRafId = null;
+            if (!isDestroyed) refresh();
         });
     }
 
     function redraw() {
+        if (isDestroyed) return;
         const chat = document.getElementById('chat') || document;
         chat.querySelectorAll('pre').forEach(clearRendered);
         scheduleRefresh();
@@ -537,16 +551,25 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
 
         window.__HTML_RENDER_TAVERN__ = {
             destroy() {
+                isDestroyed = true;
+                if (refreshRafId) {
+                    cancelAnimationFrame(refreshRafId);
+                    refreshRafId = null;
+                }
                 observer?.disconnect();
                 window.removeEventListener('message', onMessage);
                 if (eventSource && event_types) {
-                    eventSource.removeListener?.(event_types.CHAT_CHANGED, onChatEvent);
-                    eventSource.removeListener?.(event_types.MESSAGE_DELETED, onChatEvent);
-                    eventSource.removeListener?.(event_types.MESSAGE_SWIPED, onChatEvent);
-                    eventSource.removeListener?.(event_types.MESSAGE_UPDATED, onChatEvent);
-                    eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
-                    eventSource.removeListener?.(event_types.USER_MESSAGE_RENDERED, onChatEvent);
-                    eventSource.removeListener?.(event_types.GENERATION_STOPPED, onChatEvent);
+                    const remove = (ev, fn) => {
+                        eventSource.removeListener?.(ev, fn);
+                        eventSource.off?.(ev, fn);
+                    };
+                    remove(event_types.CHAT_CHANGED, onChatEvent);
+                    remove(event_types.MESSAGE_DELETED, onChatEvent);
+                    remove(event_types.MESSAGE_SWIPED, onChatEvent);
+                    remove(event_types.MESSAGE_UPDATED, onChatEvent);
+                    remove(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
+                    remove(event_types.USER_MESSAGE_RENDERED, onChatEvent);
+                    remove(event_types.GENERATION_STOPPED, onChatEvent);
                 }
                 document.getElementById('hrt-settings')?.remove();
                 document.querySelectorAll('.hrt-frame').forEach(disposeFrame);

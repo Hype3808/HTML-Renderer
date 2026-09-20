@@ -2,10 +2,18 @@
     display: block;
     width: 100%;
     min-height: 1px;
+    height: 1px;
     border: 0;
     margin: 0.65rem 0;
     background: transparent;
     overflow: hidden;
+    color-scheme: normal;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+}
+
+.hrt-frame.hrt-ready {
+    opacity: 1;
 }
 
 .hrt-source-hidden {

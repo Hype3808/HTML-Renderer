@@ -52,6 +52,7 @@
         const localStored = getLocalSettings();
         const persisted = stored && Object.keys(stored).length > 0 ? stored : localStored;
         settings = { ...DEFAULTS, ...persisted };
+        settings.renderDepth = Math.max(0, Number(settings.renderDepth) || 0);
         // 1.0.0 版本保存过 `sandbox: true`；升级时将其迁移到兼容的默认值。
         // 用户可以在设置中切换回隔离模式。
         if (persisted.parentBridge === undefined) {
@@ -66,49 +67,74 @@
     function saveSettings() {
         window.extension_settings[SETTINGS_KEY] = settings;
         saveLocalSettings();
-        window.saveSettingsDebounced?.();
+        const saveFn = window.saveSettingsDebounced || window.SillyTavern?.getContext?.()?.saveSettingsDebounced || window.saveSettings;
+        saveFn?.();
+    }
+
+    function isSupportedLanguage(code) {
+        const className = code.className || '';
+        const match = className.match(/(?:^|\s)(?:language|lang)-([a-zA-Z0-9_-]+)(?:\s|$)/i);
+        if (!match) return true; // 未指定语言，允许匹配
+        const lang = match[1].toLowerCase();
+        return ['html', 'htm', 'xhtml', 'xml'].includes(lang);
     }
 
     function isHtmlDocument(source) {
         return /<body(?:\s[^>]*)?>[\s\S]*<\/body\s*>/i.test(source);
     }
 
-    function messageIsInDepth(pre) {
-        if (!settings.renderDepth) return true;
-        const message = pre.closest('.mes');
-        if (!message) return true;
-        const messages = [...document.querySelectorAll('#chat .mes')];
-        return messages.slice(-settings.renderDepth).includes(message);
+    function isStreamingMessage(message) {
+        if (!message) return false;
+        return message.getAttribute('is_streaming') === 'true' ||
+            message.classList.contains('streaming') ||
+            message.classList.contains('is_streaming');
     }
 
     function viewportScript() {
-        // 此脚本在卡片标记之后运行，因此首次测量会包含卡片自身的样式和布局，
-        // 而不是使用浏览器默认的 150px iframe 高度。
+        // 此脚本在卡片标记之后运行，负责实时精确测量内容尺寸并向宿主窗口回报。
         return `<script>
 (() => {
+  let lastReportedHeight = 0;
+  let rafId = null;
+
   const height = () => {
     const body = document.body;
     const html = document.documentElement;
     if (!body || !html) return 1;
 
-    // 卡片从长标签页切换到短标签页后，scrollHeight 可能仍等于旧的 iframe 视口高度。
-    // 因此改为测量可见内容的底部边缘，这样高度既能增加，也能缩小。
+    // 测量可见内容的底部边缘，准确计算增加与缩小，并兼容底部 margin 与 padding
     const bodyTop = body.getBoundingClientRect().top;
     let contentBottom = 0;
     for (const child of body.children) {
+      if (child.tagName === 'SCRIPT' || child.tagName === 'STYLE' || child.tagName === 'LINK') continue;
+      const style = window.getComputedStyle(child);
+      if (style.display === 'none' || style.position === 'fixed') continue;
       const rect = child.getBoundingClientRect();
-      if (rect.width || rect.height) contentBottom = Math.max(contentBottom, rect.bottom - bodyTop);
+      const marginBottom = parseFloat(style.marginBottom) || 0;
+      if (rect.width || rect.height) {
+        contentBottom = Math.max(contentBottom, rect.bottom - bodyTop + marginBottom);
+      }
     }
-    if (contentBottom > 0) return Math.ceil(contentBottom + 1);
+    const bodyPaddingBottom = parseFloat(window.getComputedStyle(body).paddingBottom) || 0;
+    if (contentBottom > 0) return Math.ceil(contentBottom + bodyPaddingBottom);
     return Math.max(1, body.scrollHeight);
   };
-  const report = () => parent.postMessage({ type: 'html-render-tavern:height', height: height() }, '*');
+
+  const report = () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      const h = height();
+      if (Math.abs(h - lastReportedHeight) >= 1) {
+        lastReportedHeight = h;
+        parent.postMessage({ type: 'html-render-tavern:height', height: h }, '*');
+      }
+    });
+  };
+
   const resizeObservers = [];
   const mutationObservers = [];
   const observe = () => {
-    const documentObserver = new ResizeObserver(report);
-    documentObserver.observe(document.documentElement);
-    resizeObservers.push(documentObserver);
     if (document.body) {
       const bodyObserver = new ResizeObserver(report);
       bodyObserver.observe(document.body);
@@ -118,26 +144,46 @@
     mutationObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true });
     mutationObservers.push(mutationObserver);
   };
+
   const stop = () => {
+    if (rafId) cancelAnimationFrame(rafId);
     resizeObservers.forEach(observer => observer.disconnect());
     mutationObservers.forEach(observer => observer.disconnect());
   };
+
+  // 外链处理：哈希锚点与 javascript 留在内部，外部链接自动新标签打开
+  document.addEventListener('click', event => {
+    const link = event.target.closest('a');
+    if (!link) return;
+    const href = link.getAttribute('href');
+    if (href && !href.startsWith('#') && !href.startsWith('javascript:') && !link.target) {
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+    }
+  });
+
   observe();
   addEventListener('pagehide', stop, { once: true });
-  addEventListener('load', () => { report(); requestAnimationFrame(report); setTimeout(report, 100); });
+  addEventListener('resize', report);
+  addEventListener('load', () => { report(); setTimeout(report, 100); });
   document.fonts?.ready?.then(report);
+  document.querySelectorAll('img').forEach(img => {
+    if (!img.complete) {
+      img.addEventListener('load', report, { once: true });
+      img.addEventListener('error', report, { once: true });
+    }
+  });
   addEventListener('message', event => { if (event.data?.type === 'html-render-tavern:measure') report(); });
   addEventListener('message', event => {
     if (event.data?.type === 'html-render-tavern:dispose') stop();
   });
-  requestAnimationFrame(report);
+  report();
 })();
 </script>`;
     }
 
     function parentBridgeScript() {
-        // 卡片运行在自己的文档中，但较旧的 Tavern Helper 卡片需要其便捷的全局对象。
-        // DOM 查询保持在本地，同时只从父页面转发明确的 Tavern Helper / MVU 函数和值。
+        // 卡片运行在自己的文档中，但 Tavern Helper / MVU 卡片需要便捷的全局对象与 API。
         return `<script>
 (() => {
   try {
@@ -145,25 +191,47 @@
     const api = host.TavernHelper || host;
     const hostJQuery = host.jQuery || host.$;
     if (hostJQuery) {
-      const localJQuery = (selector, context) => typeof selector === 'function'
-        ? hostJQuery(selector)
-        : hostJQuery(selector, context || document);
+      const localJQuery = function(selector, context) {
+        if (typeof selector === 'function') {
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => selector(localJQuery), { once: true });
+          } else {
+            selector(localJQuery);
+          }
+          return localJQuery(document);
+        }
+        return hostJQuery(selector, context || document);
+      };
+      Object.assign(localJQuery, hostJQuery);
       localJQuery.fn = hostJQuery.fn;
       window.$ = window.jQuery = localJQuery;
     }
     if (host._) window._ = host._;
-    // Tavern Helper 会把支持 iframe 的函数放在 _bind 映射中。将这些函数绑定到此 iframe
-    // 的 window 至关重要：这样 getAllVariables() 才能解析拥有此卡片的消息，
-    // 而不是读取最新的聊天消息。
+    if (host.toastr) window.toastr = host.toastr;
+    if (host.TavernHelper || api) window.TavernHelper = host.TavernHelper || api;
+
+    // 绑定 Tavern Helper 的 _bind 函数
     for (const [name, value] of Object.entries(api._bind || {})) {
       if (typeof value === 'function') window[name.replace(/^_/, '')] = value.bind(window);
     }
-    for (const name of ['getAllVariables', 'waitGlobalInitialized', 'eventOn', 'eventClearAll', 'errorCatched']) {
+    const standardApis = [
+      'getAllVariables', 'getVariable', 'getVariables', 'setVariable', 'setVariables',
+      'updateVariable', 'deleteVariable', 'waitGlobalInitialized', 'eventOn', 'eventOnce',
+      'eventEmit', 'eventClearAll', 'getButtonEvent', 'getIframeName', 'errorCatched',
+      'triggerSlash', 'executeSlashCommands', 'sendSystemMessage', 'insertUserMessage',
+      'saveChat', 'getChat', 'reloadCurrentChat', 'replaceTavernRegexes'
+    ];
+    for (const name of standardApis) {
       if (typeof window[name] !== 'function' && typeof api[name] === 'function') {
-        window[name] = api[name].bind(api);
+        window[name] = typeof api._bind?.[name] === 'function'
+          ? api._bind[name].bind(window)
+          : api[name].bind(api);
       }
     }
-    Object.defineProperty(window, 'Mvu', { configurable: true, get: () => host.Mvu || api.Mvu });
+    const getMvu = () => host.Mvu || api.Mvu || host.mvu || api.mvu;
+    Object.defineProperty(window, 'Mvu', { configurable: true, get: getMvu });
+    Object.defineProperty(window, 'mvu', { configurable: true, get: getMvu });
+
     addEventListener('pagehide', () => window.eventClearAll?.(), { once: true });
     addEventListener('message', event => {
       if (event.data?.type === 'html-render-tavern:dispose') window.eventClearAll?.();
@@ -176,58 +244,54 @@
     }
 
     function createDocument(source, inheritedStyle, useParentBridge) {
-        const head = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">${useParentBridge ? parentBridgeScript() : ''}`;
-        const script = viewportScript();
-        // closing-body 注入会特意放在卡片 CSS（包括带有 !important 的 CSS）之后。
-        // 它只移除文档级滚动，卡片自身可滚动的面板仍然正常工作。
-        const finalStyle = `<style id="hrt-document-style">
-html{color:${inheritedStyle.color};font-family:${inheritedStyle.fontFamily};font-size:${inheritedStyle.fontSize};line-height:${inheritedStyle.lineHeight};}
-html,body{margin:0!important;padding:0!important;max-width:100%!important;overflow:hidden!important;}
+        const headContent = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style id="hrt-initial-style">
+html,body{margin:0;padding:0;background-color:transparent;color:${inheritedStyle.color};font-family:${inheritedStyle.fontFamily};font-size:${inheritedStyle.fontSize};line-height:${inheritedStyle.lineHeight};}
 *,*::before,*::after{box-sizing:border-box;}
+</style>${useParentBridge ? parentBridgeScript() : ''}`;
+        const script = viewportScript();
+        const finalStyle = `<style id="hrt-document-style">
+html,body{max-width:100%!important;overflow:hidden!important;}
 html{scrollbar-width:none;-ms-overflow-style:none;}
 html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}
 </style>`;
+
         let documentSource = source;
         if (/<head(?:\s[^>]*)?>/i.test(source)) {
-            documentSource = source.replace(/<head(\s[^>]*)?>/i, match => `${match}${head}`);
+            documentSource = source.replace(/<head(\s[^>]*)?>/i, match => `${match}${headContent}`);
+        } else if (/<html(?:\s[^>]*)?>/i.test(source)) {
+            documentSource = source.replace(/<html(\s[^>]*)?>/i, match => `${match}<head>${headContent}</head>`);
         } else {
-            documentSource = source.replace(/<body(\s[^>]*)?>/i, match => `<!doctype html><html><head>${head}</head>${match}`);
+            documentSource = `<!doctype html><html><head>${headContent}</head>${source}`;
         }
-        return documentSource.replace(/<\/body\s*>/i, `${finalStyle}${script}</body>`);
-    }
 
-    function clearRendered(pre) {
-        const entry = rendered.get(pre);
-        if (!entry) return;
-        entry.frame.remove();
-        const blobUrl = entry.url || entry.frame.dataset.hrtBlobUrl;
-        if (blobUrl) URL.revokeObjectURL(blobUrl);
-        pre.classList.remove('hrt-source-hidden');
-        rendered.delete(pre);
+        const lastBodyIndex = documentSource.toLowerCase().lastIndexOf('</body>');
+        if (lastBodyIndex !== -1) {
+            documentSource = documentSource.slice(0, lastBodyIndex) + finalStyle + script + documentSource.slice(lastBodyIndex);
+        } else {
+            documentSource = documentSource + finalStyle + script;
+        }
+
+        if (!/<\/html\s*>/i.test(documentSource)) {
+            documentSource += '</html>';
+        }
+
+        return documentSource;
     }
 
     function renderKey(pre) {
         const message = pre.closest('.mes');
         const messageId = message?.getAttribute('mesid');
         if (messageId === null || messageId === undefined) return null;
-        const blockIndex = [...message.querySelectorAll('pre')].indexOf(pre);
+        const htmlPres = [...message.querySelectorAll('pre')].filter(p => {
+            const c = p.querySelector(':scope > code');
+            return c && isSupportedLanguage(c) && isHtmlDocument(c.textContent ?? '');
+        });
+        const blockIndex = htmlPres.indexOf(pre);
         return `${messageId}:${Math.max(0, blockIndex)}`;
     }
 
-    function removeDuplicateFrames() {
-        const seen = new Set();
-        document.querySelectorAll('.hrt-frame[data-hrt-key]').forEach(frame => {
-            const key = frame.dataset.hrtKey;
-            if (!key) return;
-            if (seen.has(key)) {
-                disposeFrame(frame);
-            } else {
-                seen.add(key);
-            }
-        });
-    }
-
     function disposeFrame(frame) {
+        if (!frame) return;
         try {
             frame.contentWindow?.postMessage({ type: 'html-render-tavern:dispose' }, '*');
             frame.contentWindow?.eventClearAll?.();
@@ -236,71 +300,112 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         }
         const blobUrl = frame.dataset.hrtBlobUrl;
         if (blobUrl) URL.revokeObjectURL(blobUrl);
-        frame.src = 'about:blank';
+        try {
+            frame.src = 'about:blank';
+        } catch {
+            // Frame might be detached
+        }
         frame.remove();
     }
 
-    function renderPre(pre) {
+    function clearRendered(pre) {
+        const entry = rendered.get(pre);
+        if (!entry) return;
+        disposeFrame(entry.frame);
+        pre.classList.remove('hrt-source-hidden');
+        rendered.delete(pre);
+    }
+
+    function cleanOrphanAndDuplicateFrames() {
+        const seen = new Set();
+        document.querySelectorAll('.hrt-frame').forEach(frame => {
+            const key = frame.dataset.hrtKey;
+            const prev = frame.previousElementSibling;
+            // 孤儿 frame 清理：若前驱不是 pre，说明源代码块已被编辑或移除
+            if (!prev || prev.tagName !== 'PRE') {
+                disposeFrame(frame);
+                return;
+            }
+            if (key) {
+                if (seen.has(key)) {
+                    disposeFrame(frame);
+                } else {
+                    seen.add(key);
+                }
+            }
+        });
+    }
+
+    function renderPre(pre, allowedMessages) {
         const code = pre.querySelector(':scope > code');
-        if (!code || !settings.enabled || !messageIsInDepth(pre)) return;
-        const currentEntry = rendered.get(pre);
-        if (currentEntry?.frame.isConnected) return;
-        if (currentEntry) {
-            if (currentEntry.frame.dataset.hrtBlobUrl) URL.revokeObjectURL(currentEntry.frame.dataset.hrtBlobUrl);
-            rendered.delete(pre);
-        }
+        if (!code || !settings.enabled) return;
+        if (!isSupportedLanguage(code)) return;
+
+        const message = pre.closest('.mes');
+        if (!message) return;
+        // 流式传输期间暂不渲染，避免频繁创建/销毁 iframe 导致界面卡顿与闪烁
+        if (isStreamingMessage(message)) return;
+        if (allowedMessages && !allowedMessages.has(message)) return;
+
         const source = code.textContent ?? '';
         if (!isHtmlDocument(source)) return;
 
-        // SillyTavern 可能会在聊天水合期间重新创建相同的消息节点。
-        // 复用现有 iframe，而不是再次渲染一份副本。
+        const currentEntry = rendered.get(pre);
+        if (currentEntry?.frame.isConnected && currentEntry.source === source) return;
+
+        if (currentEntry) {
+            disposeFrame(currentEntry.frame);
+            rendered.delete(pre);
+        }
+
         const key = renderKey(pre);
-        const existing = key
-            ? [...document.querySelectorAll('.hrt-frame[data-hrt-key]')].find(frame => frame.dataset.hrtKey === key)
-            : null;
-        if (existing) {
+        // 若已有紧跟当前 pre 的同 key iframe，直接复用
+        const nextElem = pre.nextElementSibling;
+        if (nextElem?.classList.contains('hrt-frame') && nextElem.dataset.hrtKey === key) {
             if (settings.hideSource) pre.classList.add('hrt-source-hidden');
-            rendered.set(pre, { frame: existing, url: null });
+            rendered.set(pre, { frame: nextElem, url: null, source });
             return;
         }
 
         const frame = document.createElement('iframe');
         frame.className = 'hrt-frame';
         frame.title = '已渲染的 HTML 消息';
-        frame.loading = 'lazy';
+        frame.loading = 'eager';
         frame.setAttribute('frameborder', '0');
-        const message = pre.closest('.mes');
-        const messageId = message?.getAttribute('mesid');
+        frame.setAttribute('scrolling', 'no');
+        frame.setAttribute('allowtransparency', 'true');
+
+        const messageId = message.getAttribute('mesid');
         if (messageId !== null && messageId !== undefined) {
-            // Tavern Helper 通过稳定的 iframe name/id 识别渲染卡片所属的消息。
-            // 所需格式为：
-            // TH-message--<message-id>--<code-block-index>.
-            const blockIndex = [...message.querySelectorAll('pre')].indexOf(pre);
-            frame.id = `TH-message--${messageId}--${Math.max(0, blockIndex)}`;
+            // Tavern Helper 格式：TH-message--楼层号--前端界面是该楼层第几个界面
+            const blockIndex = key ? key.split(':')[1] : '0';
+            frame.id = `TH-message--${messageId}--${blockIndex}`;
             frame.name = frame.id;
         }
         if (key) frame.dataset.hrtKey = key;
-        if (!settings.parentBridge) frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups');
-        // iframe 不会继承 SillyTavern 的字体或文字颜色。
-        // 从外层消息设置默认值，但不覆盖卡片明确指定的 CSS，
-        // 这样未设置样式的文字在当前主题中仍然清晰可读。
+        if (!settings.parentBridge) {
+            frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals allow-popups allow-downloads');
+        }
+
+        // iframe 默认样式与主题继承
         const messageText = pre.closest('.mes_text') ?? document.body;
         const inheritedStyle = getComputedStyle(messageText);
         const themeStyle = getComputedStyle(document.documentElement);
-        // 卡片或主题可能会有意调暗 `mes_text`。透明的 iframe 文档应改用应用的正常前景色，
-        // 就像文字直接写在聊天区域上一样。
         const themeForeground = themeStyle.getPropertyValue('--SmartThemeBodyColor').trim();
         const defaultColor = themeForeground && CSS.supports('color', themeForeground)
             ? themeForeground
             : inheritedStyle.color;
+
         const documentSource = createDocument(source, {
             color: defaultColor,
             fontFamily: inheritedStyle.fontFamily,
             fontSize: inheritedStyle.fontSize,
             lineHeight: inheritedStyle.lineHeight,
         }, settings.parentBridge);
-        let url;
-        if (settings.useBlobUrls) {
+
+        let url = null;
+        const useBlob = settings.useBlobUrls || /<!--\s*enable-blob-url-render\s*-->/i.test(source);
+        if (useBlob) {
             url = URL.createObjectURL(new Blob([documentSource], { type: 'text/html' }));
             frame.dataset.hrtBlobUrl = url;
             frame.src = url;
@@ -311,14 +416,26 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         pre.insertAdjacentElement('afterend', frame);
         frame.addEventListener('load', () => frame.contentWindow?.postMessage({ type: 'html-render-tavern:measure' }, '*'));
         if (settings.hideSource) pre.classList.add('hrt-source-hidden');
-        rendered.set(pre, { frame, url });
+        rendered.set(pre, { frame, url, source });
     }
 
     function refresh() {
-        removeDuplicateFrames();
-        document.querySelectorAll('pre').forEach(pre => {
-            if (!settings.enabled || !messageIsInDepth(pre)) clearRendered(pre);
-            else renderPre(pre);
+        cleanOrphanAndDuplicateFrames();
+        if (!document.getElementById('hrt-settings')) addSettingsUi();
+
+        const chat = document.getElementById('chat');
+        if (!chat) return;
+
+        const chatMessages = settings.renderDepth > 0 ? [...chat.querySelectorAll('.mes')] : null;
+        const allowedMessages = chatMessages ? new Set(chatMessages.slice(-settings.renderDepth)) : null;
+
+        chat.querySelectorAll('pre').forEach(pre => {
+            const message = pre.closest('.mes');
+            if (!settings.enabled || (allowedMessages && !allowedMessages.has(message))) {
+                clearRendered(pre);
+            } else {
+                renderPre(pre, allowedMessages);
+            }
         });
     }
 
@@ -332,7 +449,8 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
     }
 
     function redraw() {
-        document.querySelectorAll('pre').forEach(clearRendered);
+        const chat = document.getElementById('chat') || document;
+        chat.querySelectorAll('pre').forEach(clearRendered);
         scheduleRefresh();
     }
 
@@ -357,30 +475,80 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
             const key = input.dataset.setting;
             input.checked = typeof settings[key] === 'boolean' ? settings[key] : false;
             if (input.type === 'number') input.value = settings[key];
-            input.addEventListener('change', () => {
+            const onChange = () => {
                 settings[key] = input.type === 'checkbox' ? input.checked : Math.max(0, Number(input.value) || 0);
                 if (key === 'parentBridge') settings.sandbox = !settings.parentBridge;
                 saveSettings();
                 redraw();
-            });
+            };
+            input.addEventListener('change', onChange);
+            if (input.type === 'number') input.addEventListener('input', onChange);
         });
     }
 
     function start() {
         getSettings();
         addSettingsUi();
+
         const onMessage = event => {
             if (event.data?.type !== 'html-render-tavern:height') return;
             const frame = [...document.querySelectorAll('.hrt-frame')].find(item => item.contentWindow === event.source);
-            if (frame && Number.isFinite(event.data.height)) frame.style.height = `${Math.max(1, Math.ceil(event.data.height))}px`;
+            if (frame && Number.isFinite(event.data.height)) {
+                const targetHeight = `${Math.max(1, Math.ceil(event.data.height))}px`;
+                if (frame.style.height !== targetHeight) {
+                    frame.style.height = targetHeight;
+                }
+                if (!frame.classList.contains('hrt-ready')) {
+                    frame.classList.add('hrt-ready');
+                }
+            }
         };
         window.addEventListener('message', onMessage);
-        observer = new MutationObserver(scheduleRefresh);
-        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+        observer = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                for (const node of mutation.removedNodes) {
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        if (node.classList?.contains('hrt-frame')) {
+                            disposeFrame(node);
+                        } else if (node.querySelectorAll) {
+                            node.querySelectorAll('.hrt-frame').forEach(disposeFrame);
+                        }
+                    }
+                }
+            }
+            scheduleRefresh();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+
+        // 绑定 SillyTavern 事件系统（如果可用）
+        const eventSource = window.eventSource || window.SillyTavern?.getContext?.()?.eventSource;
+        const event_types = window.event_types || window.SillyTavern?.getContext?.()?.event_types;
+        const onChatEvent = () => scheduleRefresh();
+        if (eventSource && event_types) {
+            eventSource.on(event_types.CHAT_CHANGED, onChatEvent);
+            eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
+            eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
+            eventSource.on(event_types.MESSAGE_UPDATED, onChatEvent);
+            eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
+            eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatEvent);
+            eventSource.on(event_types.GENERATION_STOPPED, onChatEvent);
+        }
+
         window.__HTML_RENDER_TAVERN__ = {
             destroy() {
                 observer?.disconnect();
                 window.removeEventListener('message', onMessage);
+                if (eventSource && event_types) {
+                    eventSource.removeListener?.(event_types.CHAT_CHANGED, onChatEvent);
+                    eventSource.removeListener?.(event_types.MESSAGE_DELETED, onChatEvent);
+                    eventSource.removeListener?.(event_types.MESSAGE_SWIPED, onChatEvent);
+                    eventSource.removeListener?.(event_types.MESSAGE_UPDATED, onChatEvent);
+                    eventSource.removeListener?.(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
+                    eventSource.removeListener?.(event_types.USER_MESSAGE_RENDERED, onChatEvent);
+                    eventSource.removeListener?.(event_types.GENERATION_STOPPED, onChatEvent);
+                }
+                document.getElementById('hrt-settings')?.remove();
                 document.querySelectorAll('.hrt-frame').forEach(disposeFrame);
                 document.querySelectorAll('pre.hrt-source-hidden').forEach(pre => pre.classList.remove('hrt-source-hidden'));
             },

@@ -14,6 +14,12 @@
     let isDestroyed = false;
     let refreshRafId = null;
 
+    // 流式传输与生成状态跟踪
+    let isGenerating = false;
+    let streamingMessageId = null;
+    let streamTokenTimer = null;
+    const activeMutatingMesIds = new Set();
+
     const EXTENSION_ID = 'html-render-tavern';
     const SETTINGS_KEY = 'htmlRenderTavern';
     const DEFAULTS = Object.freeze({
@@ -85,11 +91,65 @@
         return /<body(?:\s[^>]*)?>[\s\S]*<\/body\s*>/i.test(source);
     }
 
-    function isStreamingMessage(message) {
+    function checkContextIsGenerating() {
+        try {
+            const context = window.SillyTavern?.getContext?.();
+            if (typeof context?.isGenerating === 'boolean') {
+                return context.isGenerating;
+            }
+        } catch {}
+        return false;
+    }
+
+    function isGenerationInProgress() {
+        const stopBtn = document.getElementById('mes_stop') || document.querySelector('.mes_stop');
+        const isStopVisible = Boolean(stopBtn && (stopBtn.offsetParent !== null || getComputedStyle(stopBtn).display !== 'none'));
+        const sendBtn = document.getElementById('send_but');
+        const isSendVisible = Boolean(sendBtn && (sendBtn.offsetParent !== null || getComputedStyle(sendBtn).display !== 'none'));
+
+        // 如果停止按钮已隐藏且发送按钮可见，说明生成已结束
+        if (stopBtn && !isStopVisible && isSendVisible) {
+            if (isGenerating) {
+                isGenerating = false;
+                streamingMessageId = null;
+                activeMutatingMesIds.clear();
+            }
+            return false;
+        }
+
+        if (isStopVisible) return true;
+        if (isGenerating) return true;
+        if (checkContextIsGenerating()) return true;
+
+        const loading = document.getElementById('loading_mes') || document.querySelector('.typing_indicator, .loading_mes');
+        if (loading && (loading.offsetParent !== null || getComputedStyle(loading).display !== 'none')) {
+            return true;
+        }
+
+        return false;
+    }
+
+    function isMessageStreaming(message) {
         if (!message) return false;
-        return message.getAttribute('is_streaming') === 'true' ||
+        if (message.getAttribute('is_streaming') === 'true' ||
             message.classList.contains('streaming') ||
-            message.classList.contains('is_streaming');
+            message.classList.contains('is_streaming')) {
+            return true;
+        }
+        if (isGenerationInProgress()) {
+            const mesId = message.getAttribute('mesid');
+            if (streamingMessageId !== null && mesId !== null && mesId === String(streamingMessageId)) {
+                return true;
+            }
+            if (mesId !== null && activeMutatingMesIds.has(mesId)) {
+                return true;
+            }
+            const lastMes = document.querySelector('#chat .mes:last-child');
+            if (message === lastMes) {
+                return true;
+            }
+        }
+        return false;
     }
 
     function viewportScript() {
@@ -353,9 +413,7 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         if (!isSupportedLanguage(code)) return;
 
         const message = pre.closest('.mes');
-        if (!message) return;
-        // 流式传输期间暂不渲染，避免频繁创建/销毁 iframe 导致界面卡顿与闪烁
-        if (isStreamingMessage(message)) return;
+        if (!message || isMessageStreaming(message)) return;
         if (allowedMessages && !allowedMessages.has(message)) return;
 
         const source = code.textContent ?? '';
@@ -443,6 +501,9 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
 
         chat.querySelectorAll('pre').forEach(pre => {
             const message = pre.closest('.mes');
+            if (isMessageStreaming(message)) {
+                return; // 流式传输期间暂不渲染，避免频繁创建/销毁 iframe 导致界面卡顿、重置与动画闪烁
+            }
             if (!settings.enabled || (allowedMessages && !allowedMessages.has(message))) {
                 clearRendered(pre);
             } else {
@@ -520,7 +581,18 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         window.addEventListener('message', onMessage);
 
         observer = new MutationObserver(mutations => {
+            const generating = isGenerationInProgress();
             for (const mutation of mutations) {
+                if (generating) {
+                    const targetEl = mutation.target.nodeType === Node.ELEMENT_NODE
+                        ? mutation.target
+                        : mutation.target.parentElement;
+                    const mes = targetEl?.closest?.('.mes');
+                    const mesId = mes?.getAttribute('mesid');
+                    if (mesId !== null && mesId !== undefined) {
+                        activeMutatingMesIds.add(mesId);
+                    }
+                }
                 for (const node of mutation.removedNodes) {
                     if (node.nodeType === Node.ELEMENT_NODE) {
                         if (node.classList?.contains('hrt-frame')) {
@@ -539,14 +611,47 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
         const eventSource = window.eventSource || window.SillyTavern?.getContext?.()?.eventSource;
         const event_types = window.event_types || window.SillyTavern?.getContext?.()?.event_types;
         const onChatEvent = () => scheduleRefresh();
+
+        const onGenStarted = () => {
+            isGenerating = true;
+        };
+
+        const onTokenReceived = data => {
+            isGenerating = true;
+            const id = data?.messageId ?? data?.mesId ?? (typeof data === 'number' ? data : null);
+            if (id !== null && id !== undefined) {
+                streamingMessageId = String(id);
+            }
+            if (streamTokenTimer) clearTimeout(streamTokenTimer);
+            streamTokenTimer = setTimeout(() => {
+                if (!isGenerationInProgress()) {
+                    onGenEnded();
+                }
+            }, 600);
+        };
+
+        const onGenEnded = () => {
+            if (streamTokenTimer) {
+                clearTimeout(streamTokenTimer);
+                streamTokenTimer = null;
+            }
+            isGenerating = false;
+            streamingMessageId = null;
+            activeMutatingMesIds.clear();
+            scheduleRefresh();
+        };
+
         if (eventSource && event_types) {
-            eventSource.on(event_types.CHAT_CHANGED, onChatEvent);
-            eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
-            eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
-            eventSource.on(event_types.MESSAGE_UPDATED, onChatEvent);
-            eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
-            eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatEvent);
-            eventSource.on(event_types.GENERATION_STOPPED, onChatEvent);
+            if (event_types.GENERATION_STARTED) eventSource.on(event_types.GENERATION_STARTED, onGenStarted);
+            if (event_types.STREAM_TOKEN_RECEIVED) eventSource.on(event_types.STREAM_TOKEN_RECEIVED, onTokenReceived);
+            if (event_types.GENERATION_ENDED) eventSource.on(event_types.GENERATION_ENDED, onGenEnded);
+            if (event_types.GENERATION_STOPPED) eventSource.on(event_types.GENERATION_STOPPED, onGenEnded);
+            if (event_types.CHARACTER_MESSAGE_RENDERED) eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onGenEnded);
+            if (event_types.USER_MESSAGE_RENDERED) eventSource.on(event_types.USER_MESSAGE_RENDERED, onChatEvent);
+            if (event_types.CHAT_CHANGED) eventSource.on(event_types.CHAT_CHANGED, onChatEvent);
+            if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, onChatEvent);
+            if (event_types.MESSAGE_SWIPED) eventSource.on(event_types.MESSAGE_SWIPED, onChatEvent);
+            if (event_types.MESSAGE_UPDATED) eventSource.on(event_types.MESSAGE_UPDATED, onChatEvent);
         }
 
         window.__HTML_RENDER_TAVERN__ = {
@@ -556,6 +661,14 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
                     cancelAnimationFrame(refreshRafId);
                     refreshRafId = null;
                 }
+                if (streamTokenTimer) {
+                    clearTimeout(streamTokenTimer);
+                    streamTokenTimer = null;
+                }
+                isGenerating = false;
+                streamingMessageId = null;
+                activeMutatingMesIds.clear();
+
                 observer?.disconnect();
                 window.removeEventListener('message', onMessage);
                 if (eventSource && event_types) {
@@ -563,13 +676,16 @@ html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!impor
                         eventSource.removeListener?.(ev, fn);
                         eventSource.off?.(ev, fn);
                     };
-                    remove(event_types.CHAT_CHANGED, onChatEvent);
-                    remove(event_types.MESSAGE_DELETED, onChatEvent);
-                    remove(event_types.MESSAGE_SWIPED, onChatEvent);
-                    remove(event_types.MESSAGE_UPDATED, onChatEvent);
-                    remove(event_types.CHARACTER_MESSAGE_RENDERED, onChatEvent);
-                    remove(event_types.USER_MESSAGE_RENDERED, onChatEvent);
-                    remove(event_types.GENERATION_STOPPED, onChatEvent);
+                    if (event_types.GENERATION_STARTED) remove(event_types.GENERATION_STARTED, onGenStarted);
+                    if (event_types.STREAM_TOKEN_RECEIVED) remove(event_types.STREAM_TOKEN_RECEIVED, onTokenReceived);
+                    if (event_types.GENERATION_ENDED) remove(event_types.GENERATION_ENDED, onGenEnded);
+                    if (event_types.GENERATION_STOPPED) remove(event_types.GENERATION_STOPPED, onGenEnded);
+                    if (event_types.CHARACTER_MESSAGE_RENDERED) remove(event_types.CHARACTER_MESSAGE_RENDERED, onGenEnded);
+                    if (event_types.USER_MESSAGE_RENDERED) remove(event_types.USER_MESSAGE_RENDERED, onChatEvent);
+                    if (event_types.CHAT_CHANGED) remove(event_types.CHAT_CHANGED, onChatEvent);
+                    if (event_types.MESSAGE_DELETED) remove(event_types.MESSAGE_DELETED, onChatEvent);
+                    if (event_types.MESSAGE_SWIPED) remove(event_types.MESSAGE_SWIPED, onChatEvent);
+                    if (event_types.MESSAGE_UPDATED) remove(event_types.MESSAGE_UPDATED, onChatEvent);
                 }
                 document.getElementById('hrt-settings')?.remove();
                 document.querySelectorAll('.hrt-frame').forEach(disposeFrame);

@@ -315,12 +315,14 @@
     }
 
     function createDocument(source, inheritedStyle, useParentBridge) {
-        const headContent = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><style id="hrt-initial-style">
+        const headContent = `<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><style id="hrt-initial-style">
+html{background-color:transparent!important;}
 html,body{margin:0;padding:0;background-color:transparent;color:${inheritedStyle.color};font-family:${inheritedStyle.fontFamily};font-size:${inheritedStyle.fontSize};line-height:${inheritedStyle.lineHeight};}
 *,*::before,*::after{box-sizing:border-box;}
 </style>${useParentBridge ? parentBridgeScript() : ''}`;
         const script = viewportScript();
         const finalStyle = `<style id="hrt-document-style">
+html{background-color:transparent!important;}
 html,body{max-width:100%!important;overflow:hidden!important;}
 html{scrollbar-width:none;-ms-overflow-style:none;}
 html::-webkit-scrollbar,body::-webkit-scrollbar{width:0!important;height:0!important;display:none!important;}

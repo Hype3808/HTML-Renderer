@@ -283,7 +283,8 @@
       'updateVariable', 'deleteVariable', 'waitGlobalInitialized', 'eventOn', 'eventOnce',
       'eventEmit', 'eventClearAll', 'getButtonEvent', 'getIframeName', 'errorCatched',
       'triggerSlash', 'executeSlashCommands', 'sendSystemMessage', 'insertUserMessage',
-      'saveChat', 'getChat', 'reloadCurrentChat', 'replaceTavernRegexes'
+      'saveChat', 'getChat', 'reloadCurrentChat', 'replaceTavernRegexes',
+      'getChatMessages', 'getCurrentMessageId'
     ];
     for (const name of standardApis) {
       if (typeof window[name] !== 'function' && typeof api[name] === 'function') {

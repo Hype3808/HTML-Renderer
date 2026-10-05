@@ -1,5 +1,7 @@
 # HTML Render Tavern
 
+# This project is discontinued
+
 这是一个小型 SillyTavern 扩展：它会将消息 fenced code block 中的完整 HTML 文档渲染到一个可自动调整大小的 iframe 中。它专注实现了 [JS-Slash-Runner / Tavern Helper](https://github.com/N0VI028/JS-Slash-Runner) 推广的渲染方式：源代码仍保留为普通的 SillyTavern 消息，而可视化界面则运行在隔离的 iframe 中。
 
 ## 安装
